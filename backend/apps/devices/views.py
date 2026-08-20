@@ -7,13 +7,25 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.accounts.permissions import EsAdministrador, LecturaTodosEscrituraRRHH
+from apps.accounts.permissions import (
+    EsAdministrador,
+    EsAdministradorORRHH,
+    LecturaTodosEscrituraRRHH,
+)
 from apps.audit.middleware import registrar_auditoria
 from apps.audit.models import RegistroAuditoria
-from apps.devices.models import Dispositivo, RegistroSincronizacion
+from apps.devices.adms import commands as adms_commands
+from apps.devices.models import (
+    ComandoDispositivo,
+    Dispositivo,
+    PeticionADMS,
+    RegistroSincronizacion,
+)
 from apps.devices.serializers import (
+    ComandoDispositivoSerializer,
     DescargarMarcacionesSerializer,
     DispositivoSerializer,
+    PeticionADMSSerializer,
     RegistroSincronizacionSerializer,
 )
 from apps.devices.services.sincronizacion import descargar_y_procesar, ejecutar_operacion
@@ -98,6 +110,11 @@ class DispositivoViewSet(viewsets.ModelViewSet):
         if not empleados:
             return Response({"detalle": "No hay empleados pendientes de sincronizar.", "resultado": {}})
 
+        # En modo ADMS el servidor no puede iniciar la comunicacion: los
+        # empleados se dejan en cola y el equipo los recoge al consultar.
+        if dispositivo.modo == Dispositivo.Modo.ADMS:
+            return self._encolar_empleados(request, dispositivo, empleados)
+
         registro, resultado = ejecutar_operacion(
             dispositivo,
             RegistroSincronizacion.Operacion.SUBIR_EMPLEADOS,
@@ -114,6 +131,30 @@ class DispositivoViewSet(viewsets.ModelViewSet):
             descripcion=f"Subida de {resultado['procesados']} empleados al dispositivo",
         )
         return Response({"detalle": "Empleados sincronizados.", "resultado": resultado})
+
+    def _encolar_empleados(self, request, dispositivo, empleados):
+        """Deja los empleados en la cola de comandos del equipo (modo ADMS)."""
+        comandos = adms_commands.encolar_empleados(
+            dispositivo, empleados, usuario=request.user
+        )
+
+        # En ADMS la entrega no es inmediata: se marcan como sincronizados solo
+        # cuando el equipo confirma la ejecucion del comando.
+        registrar_auditoria(
+            accion=RegistroAuditoria.Accion.SINCRONIZAR,
+            modelo="Dispositivo",
+            objeto_id=dispositivo.id,
+            descripcion=f"Se encolaron {len(comandos)} empleados para el equipo (modo ADMS)",
+        )
+        return Response(
+            {
+                "detalle": (
+                    f"Se encolaron {len(comandos)} empleado(s). El equipo los recibira "
+                    "la proxima vez que consulte al servidor."
+                ),
+                "resultado": {"encolados": len(comandos), "procesados": 0, "fallidos": 0},
+            }
+        )
 
     @action(detail=True, methods=["get"], url_path="empleados-en-equipo")
     def empleados_en_equipo(self, request, pk=None):
@@ -139,6 +180,26 @@ class DispositivoViewSet(viewsets.ModelViewSet):
         El rostro no se descarga: su plantilla no es accesible por el protocolo.
         """
         dispositivo = self.get_object()
+
+        # En ADMS no se puede pedir la informacion y esperarla: se solicita al
+        # equipo que reenvie sus datos y estos llegan por /iclock/cdata.
+        if dispositivo.modo == Dispositivo.Modo.ADMS:
+            adms_commands.encolar(
+                dispositivo,
+                ComandoDispositivo.Tipo.SOLICITAR_DATOS,
+                adms_commands.COMANDOS_SIMPLES[ComandoDispositivo.Tipo.SOLICITAR_DATOS],
+                usuario=request.user,
+            )
+            return Response(
+                {
+                    "detalle": (
+                        "Se solicito al equipo el reenvio de sus datos. Las huellas y el "
+                        "estado de enrolamiento se actualizaran cuando el equipo responda."
+                    ),
+                    "resultado": {"encolado": True},
+                }
+            )
+
         registro, resultado = ejecutar_operacion(
             dispositivo,
             RegistroSincronizacion.Operacion.DESCARGAR_HUELLAS,
@@ -156,6 +217,26 @@ class DispositivoViewSet(viewsets.ModelViewSet):
     def descargar_marcaciones(self, request, pk=None):
         """Descarga las marcaciones y recalcula los dias afectados."""
         dispositivo = self.get_object()
+
+        # En ADMS las marcaciones llegan solas. Lo unico que se puede hacer es
+        # pedirle al equipo que reenvie lo que tenga almacenado.
+        if dispositivo.modo == Dispositivo.Modo.ADMS:
+            adms_commands.encolar(
+                dispositivo,
+                ComandoDispositivo.Tipo.SOLICITAR_DATOS,
+                adms_commands.COMANDOS_SIMPLES[ComandoDispositivo.Tipo.SOLICITAR_DATOS],
+                usuario=request.user,
+            )
+            return Response(
+                {
+                    "detalle": (
+                        "En modo ADMS el equipo envia las marcaciones automaticamente. "
+                        "Se le solicito reenviar los datos que tenga pendientes."
+                    ),
+                    "resultado": {"encolado": True, "nuevas": 0},
+                }
+            )
+
         serializer = DescargarMarcacionesSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -235,3 +316,61 @@ class RegistroSincronizacionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = RegistroSincronizacionSerializer
     filterset_fields = ["dispositivo", "operacion", "estado"]
     ordering_fields = ["inicio"]
+
+
+class ComandoDispositivoViewSet(viewsets.ReadOnlyModelViewSet):
+    """Cola de comandos hacia los equipos en modo ADMS."""
+
+    queryset = ComandoDispositivo.objects.select_related(
+        "dispositivo", "empleado", "creado_por"
+    ).all()
+    serializer_class = ComandoDispositivoSerializer
+    permission_classes = [LecturaTodosEscrituraRRHH]
+    filterset_fields = ["dispositivo", "tipo", "estado", "empleado"]
+    ordering_fields = ["creado_en"]
+
+    @action(detail=True, methods=["post"], permission_classes=[EsAdministrador])
+    def cancelar(self, request, pk=None):
+        """Elimina un comando que aun no se entrego al equipo."""
+        comando = self.get_object()
+        if comando.estado != ComandoDispositivo.Estado.PENDIENTE:
+            return Response(
+                {"detalle": "Solo se pueden cancelar los comandos que aun estan pendientes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        comando.delete()
+        return Response({"detalle": "Comando cancelado."})
+
+    @action(detail=False, methods=["post"], url_path="reintentar-fallidos",
+            permission_classes=[EsAdministradorORRHH])
+    def reintentar_fallidos(self, request):
+        """Vuelve a poner en cola los comandos que el equipo rechazo."""
+        queryset = ComandoDispositivo.objects.filter(
+            estado=ComandoDispositivo.Estado.FALLIDO
+        )
+        if request.data.get("dispositivo"):
+            queryset = queryset.filter(dispositivo_id=request.data["dispositivo"])
+
+        total = queryset.update(
+            estado=ComandoDispositivo.Estado.PENDIENTE,
+            codigo_retorno=None,
+            respuesta="",
+            enviado_en=None,
+            confirmado_en=None,
+        )
+        return Response({"detalle": f"Se reencolaron {total} comando(s).", "total": total})
+
+
+class PeticionADMSViewSet(viewsets.ReadOnlyModelViewSet):
+    """Bitacora de las peticiones crudas que envia el equipo.
+
+    Es la herramienta de diagnostico del protocolo: el formato ADMS varia entre
+    firmwares y aqui se ve exactamente que envia este equipo en concreto.
+    """
+
+    queryset = PeticionADMS.objects.select_related("dispositivo").all()
+    serializer_class = PeticionADMSSerializer
+    permission_classes = [EsAdministrador]
+    filterset_fields = ["dispositivo", "aceptada", "metodo"]
+    search_fields = ["ruta", "numero_serie", "cuerpo"]
+    ordering_fields = ["recibida_en"]

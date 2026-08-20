@@ -18,6 +18,16 @@ class Dispositivo(models.Model):
         ERROR = "error", "Error de conexion"
         DESCONOCIDO = "desconocido", "Desconocido"
 
+    class Modo(models.TextChoices):
+        """Forma en que el sistema se comunica con el equipo.
+
+        SDK: el servidor abre una conexion al equipo por el puerto 4370.
+        ADMS: el equipo se conecta al servidor por HTTP y le envia los datos.
+        """
+
+        SDK = "sdk", "SDK (el servidor consulta al equipo por el puerto 4370)"
+        ADMS = "adms", "ADMS / Push (el equipo envia los datos al servidor)"
+
     nombre = models.CharField("nombre", max_length=100)
     ip = models.GenericIPAddressField("direccion IP", protocol="IPv4", default="192.168.18.202")
     puerto = models.PositiveIntegerField("puerto", default=4370)
@@ -57,6 +67,41 @@ class Dispositivo(models.Model):
         max_length=20,
         default="6999383",
         help_text="Este usuario nunca se elimina durante una sincronizacion.",
+    )
+
+    # --- Comunicacion ADMS ------------------------------------------------
+    modo = models.CharField(
+        "modo de comunicacion", max_length=10, choices=Modo.choices, default=Modo.SDK
+    )
+    adms_habilitado = models.BooleanField(
+        "aceptar conexiones ADMS",
+        default=False,
+        help_text=(
+            "Permite que este equipo envie datos a los endpoints /iclock/. "
+            "Los datos solo se aceptan si el numero de serie coincide."
+        ),
+    )
+    adms_ip_permitida = models.GenericIPAddressField(
+        "IP autorizada para ADMS",
+        protocol="IPv4",
+        null=True,
+        blank=True,
+        help_text=(
+            "Si se indica, solo se aceptan peticiones ADMS que provengan de esta IP. "
+            "Es la principal defensa contra marcaciones falsas desde la red."
+        ),
+    )
+    ultima_conexion_adms = models.DateTimeField(
+        "ultima conexion ADMS", null=True, blank=True
+    )
+    adms_stamp = models.CharField(
+        "marca de tiempo de marcaciones",
+        max_length=32,
+        default="0",
+        help_text="Contador que el equipo usa para saber desde donde reenviar las marcaciones.",
+    )
+    adms_op_stamp = models.CharField(
+        "marca de tiempo de operaciones", max_length=32, default="0"
     )
 
     estado = models.CharField(
@@ -155,3 +200,130 @@ class RegistroSincronizacion(models.Model):
         if not self.fin:
             return None
         return (self.fin - self.inicio).total_seconds()
+
+
+class ComandoDispositivo(models.Model):
+    """Comando en cola para enviar al equipo cuando trabaja en modo ADMS.
+
+    En ADMS el servidor no puede iniciar la comunicacion: es el equipo el que
+    consulta periodicamente si hay algo pendiente. Por eso las ordenes (dar de
+    alta un empleado, borrarlo, pedir un reenvio de datos) se encolan aqui y se
+    entregan cuando el equipo pregunta.
+    """
+
+    class Tipo(models.TextChoices):
+        ACTUALIZAR_USUARIO = "actualizar_usuario", "Actualizar usuario"
+        ELIMINAR_USUARIO = "eliminar_usuario", "Eliminar usuario"
+        ACTUALIZAR_HUELLA = "actualizar_huella", "Restaurar huella"
+        SOLICITAR_DATOS = "solicitar_datos", "Solicitar reenvio de datos"
+        SOLICITAR_INFO = "solicitar_info", "Solicitar informacion del equipo"
+        LIMPIAR_MARCACIONES = "limpiar_marcaciones", "Limpiar marcaciones del equipo"
+        REINICIAR = "reiniciar", "Reiniciar el equipo"
+
+    class Estado(models.TextChoices):
+        PENDIENTE = "pendiente", "Pendiente de entrega"
+        ENVIADO = "enviado", "Entregado al equipo"
+        CONFIRMADO = "confirmado", "Ejecutado correctamente"
+        FALLIDO = "fallido", "El equipo reporto un error"
+
+    dispositivo = models.ForeignKey(
+        Dispositivo,
+        verbose_name="dispositivo",
+        on_delete=models.CASCADE,
+        related_name="comandos",
+    )
+    tipo = models.CharField("tipo", max_length=30, choices=Tipo.choices)
+    comando = models.TextField(
+        "comando",
+        help_text="Instruccion en el formato que espera el equipo, sin el prefijo C:<id>:",
+    )
+    estado = models.CharField(
+        "estado", max_length=20, choices=Estado.choices, default=Estado.PENDIENTE
+    )
+    empleado = models.ForeignKey(
+        "employees.Empleado",
+        verbose_name="empleado relacionado",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="comandos_dispositivo",
+    )
+    codigo_retorno = models.IntegerField(
+        "codigo de retorno",
+        null=True,
+        blank=True,
+        help_text="Lo reporta el equipo al ejecutar el comando. 0 significa exito.",
+    )
+    respuesta = models.CharField("respuesta del equipo", max_length=255, blank=True)
+
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="creado por",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="comandos_creados",
+    )
+    creado_en = models.DateTimeField("creado en", auto_now_add=True)
+    enviado_en = models.DateTimeField("entregado en", null=True, blank=True)
+    confirmado_en = models.DateTimeField("confirmado en", null=True, blank=True)
+
+    class Meta:
+        verbose_name = "comando de dispositivo"
+        verbose_name_plural = "comandos de dispositivo"
+        ordering = ["creado_en"]
+        indexes = [
+            models.Index(fields=["dispositivo", "estado"]),
+            models.Index(fields=["-creado_en"]),
+        ]
+
+    def __str__(self):
+        return f"{self.get_tipo_display()} ({self.get_estado_display()})"
+
+
+class PeticionADMS(models.Model):
+    """Registro crudo de cada peticion que el equipo hace al servidor.
+
+    El protocolo ADMS es propietario y su formato cambia entre firmwares. Tener
+    la peticion tal cual llego es lo que permite diagnosticar por que un equipo
+    concreto no envia lo que se espera, sin depender de suposiciones.
+
+    Se conserva una ventana corta de peticiones: son muchas y solo interesan
+    para diagnostico reciente.
+    """
+
+    dispositivo = models.ForeignKey(
+        Dispositivo,
+        verbose_name="dispositivo",
+        on_delete=models.CASCADE,
+        related_name="peticiones_adms",
+        null=True,
+        blank=True,
+        help_text="Nulo si el numero de serie no corresponde a ningun equipo registrado.",
+    )
+    numero_serie = models.CharField("numero de serie recibido", max_length=100, blank=True)
+    ruta = models.CharField("ruta", max_length=255)
+    metodo = models.CharField("metodo HTTP", max_length=10)
+    parametros = models.JSONField("parametros de la URL", null=True, blank=True)
+    cuerpo = models.TextField("cuerpo de la peticion", blank=True)
+    respuesta = models.TextField("respuesta enviada", blank=True)
+    ip_origen = models.GenericIPAddressField("IP de origen", null=True, blank=True)
+    aceptada = models.BooleanField(
+        "aceptada",
+        default=True,
+        help_text="Falso si se rechazo por numero de serie o IP no autorizados.",
+    )
+    registros_procesados = models.IntegerField("registros procesados", default=0)
+    recibida_en = models.DateTimeField("recibida en", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "peticion ADMS"
+        verbose_name_plural = "peticiones ADMS"
+        ordering = ["-recibida_en"]
+        indexes = [
+            models.Index(fields=["-recibida_en"]),
+            models.Index(fields=["dispositivo", "-recibida_en"]),
+        ]
+
+    def __str__(self):
+        return f"{self.metodo} {self.ruta} ({self.recibida_en:%Y-%m-%d %H:%M:%S})"

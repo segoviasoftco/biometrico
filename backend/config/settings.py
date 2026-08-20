@@ -199,6 +199,18 @@ ZK_FORCE_UDP = config("ZK_FORCE_UDP", default=False, cast=bool)
 # Usuario administrador del equipo: nunca debe ser borrado por una sincronizacion.
 ZK_ADMIN_USER_ID = config("ZK_ADMIN_USER_ID", default="6999383")
 
+# Tamano maximo de una peticion ADMS.
+#
+# El limite por defecto de Django (2.5 MB) se queda corto: un volcado completo
+# de huellas envia cada plantilla en base64, y unos pocos cientos de empleados
+# con varios dedos superan ese tamano. Con el limite por defecto, esa
+# sincronizacion fallaria con un 400 sin explicacion.
+#
+# El limite de Django queda por encima del que aplica la vista, para que sea
+# esta la que rechace el exceso con un mensaje claro y lo deje registrado.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
+ADMS_TAMANO_MAXIMO_CUERPO = 10 * 1024 * 1024
+
 # --------------------------------------------------------------------------
 # Endurecimiento para produccion
 #

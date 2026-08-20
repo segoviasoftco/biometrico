@@ -7,6 +7,10 @@ from django.urls import include, path
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # Protocolo ADMS del dispositivo biometrico. La ruta la impone el firmware,
+    # por eso queda fuera de /api/ y sin autenticacion: el equipo se identifica
+    # con su numero de serie, que las vistas validan.
+    path("iclock/", include("apps.devices.adms.urls")),
     path("api/auth/", include("apps.accounts.urls")),
     path("api/organizacion/", include("apps.organization.urls")),
     path("api/empleados/", include("apps.employees.urls")),
