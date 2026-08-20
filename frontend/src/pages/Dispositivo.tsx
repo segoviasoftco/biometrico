@@ -4,6 +4,7 @@ import {
   CloudUploadOutlined,
   ClockCircleOutlined,
   FieldTimeOutlined,
+  ReloadOutlined,
   SafetyOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,9 +23,11 @@ import {
   InputNumber,
   Modal,
   Row,
+  Select,
   Space,
   Switch,
   Table,
+  Tabs,
   Tag,
   Typography,
 } from 'antd';
@@ -34,7 +37,12 @@ import { useState } from 'react';
 import { mensajeError } from '../api/client';
 import { dispositivosApi } from '../api/endpoints';
 import { esAdministrador, puedeEditar, useAuth } from '../store/auth';
-import type { Dispositivo as TipoDispositivo, RegistroSincronizacion } from '../types';
+import type {
+  ComandoDispositivo,
+  Dispositivo as TipoDispositivo,
+  PeticionADMS,
+  RegistroSincronizacion,
+} from '../types';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -43,6 +51,13 @@ const COLOR_ESTADO_SYNC: Record<string, string> = {
   fallido: 'error',
   parcial: 'warning',
   en_proceso: 'processing',
+};
+
+const COLOR_ESTADO_COMANDO: Record<string, string> = {
+  pendiente: 'default',
+  enviado: 'processing',
+  confirmado: 'success',
+  fallido: 'error',
 };
 
 export default function Dispositivo() {
@@ -62,6 +77,7 @@ export default function Dispositivo() {
   });
 
   const equipo: TipoDispositivo | undefined = dispositivos?.results[0];
+  const modoADMS = equipo?.modo === 'adms';
 
   const { data: sincronizaciones } = useQuery({
     queryKey: ['sincronizaciones'],
@@ -69,9 +85,25 @@ export default function Dispositivo() {
     refetchInterval: 30_000,
   });
 
+  const { data: comandos } = useQuery({
+    queryKey: ['comandos-dispositivo', equipo?.id],
+    queryFn: () => dispositivosApi.comandos({ dispositivo: equipo?.id, page_size: 20 }),
+    enabled: !!equipo && modoADMS,
+    refetchInterval: 15_000,
+  });
+
+  const { data: peticionesADMS } = useQuery({
+    queryKey: ['peticiones-adms', equipo?.id],
+    queryFn: () => dispositivosApi.peticionesADMS({ dispositivo: equipo?.id, page_size: 30 }),
+    enabled: !!equipo && admin && modoADMS,
+    refetchInterval: 15_000,
+  });
+
   const invalidar = () => {
     queryClient.invalidateQueries({ queryKey: ['dispositivos'] });
     queryClient.invalidateQueries({ queryKey: ['sincronizaciones'] });
+    queryClient.invalidateQueries({ queryKey: ['comandos-dispositivo'] });
+    queryClient.invalidateQueries({ queryKey: ['peticiones-adms'] });
   };
 
   /**
@@ -132,6 +164,24 @@ export default function Dispositivo() {
     onError: (e) => message.error(mensajeError(e)),
   });
 
+  const cancelarComando = useMutation({
+    mutationFn: (id: number) => dispositivosApi.cancelarComando(id),
+    onSuccess: () => {
+      message.success('Comando cancelado.');
+      queryClient.invalidateQueries({ queryKey: ['comandos-dispositivo'] });
+    },
+    onError: (e) => message.error(mensajeError(e)),
+  });
+
+  const reintentarFallidos = useMutation({
+    mutationFn: () => dispositivosApi.reintentarComandosFallidos(equipo?.id),
+    onSuccess: (r) => {
+      message.success(r.detalle ?? 'Comandos reencolados.');
+      queryClient.invalidateQueries({ queryKey: ['comandos-dispositivo'] });
+    },
+    onError: (e) => message.error(mensajeError(e)),
+  });
+
   const confirmarLimpieza = () => {
     modal.confirm({
       title: 'Borrar las marcaciones almacenadas en el equipo?',
@@ -177,10 +227,16 @@ export default function Dispositivo() {
         <Title level={3} style={{ margin: 0 }}>
           Dispositivo Biometrico
         </Title>
-        {admin && <Button onClick={() => {
-          formConfig.setFieldsValue(equipo);
-          setConfigAbierta(true);
-        }}>Configurar</Button>}
+        {admin && (
+          <Button
+            onClick={() => {
+              formConfig.setFieldsValue(equipo);
+              setConfigAbierta(true);
+            }}
+          >
+            Configurar
+          </Button>
+        )}
       </div>
 
       <Row gutter={[16, 16]}>
@@ -192,7 +248,12 @@ export default function Dispositivo() {
                 {equipo.nombre}
               </Space>
             }
-            extra={<Tag color={conectado ? 'green' : 'red'}>{equipo.estado_display}</Tag>}
+            extra={
+              <Space>
+                <Tag color={modoADMS ? 'purple' : 'blue'}>{equipo.modo_display}</Tag>
+                <Tag color={conectado ? 'green' : 'red'}>{equipo.estado_display}</Tag>
+              </Space>
+            }
           >
             <Descriptions column={{ xs: 1, sm: 2 }} size="small" bordered>
               <Descriptions.Item label="Direccion IP">
@@ -200,7 +261,9 @@ export default function Dispositivo() {
               </Descriptions.Item>
               <Descriptions.Item label="Modelo">{equipo.modelo || '-'}</Descriptions.Item>
               <Descriptions.Item label="Numero de serie">
-                {equipo.numero_serie || '-'}
+                {equipo.numero_serie || (
+                  <Text type="danger">Sin registrar (obligatorio para ADMS)</Text>
+                )}
               </Descriptions.Item>
               <Descriptions.Item label="Firmware">
                 {equipo.version_firmware || '-'}
@@ -225,6 +288,20 @@ export default function Dispositivo() {
                   ? dayjs(equipo.ultima_sincronizacion_marcaciones).format('DD/MM/YYYY HH:mm')
                   : 'Nunca'}
               </Descriptions.Item>
+              {modoADMS && (
+                <>
+                  <Descriptions.Item label="Ultimo contacto ADMS">
+                    {equipo.ultima_conexion_adms
+                      ? dayjs(equipo.ultima_conexion_adms).format('DD/MM/YYYY HH:mm:ss')
+                      : 'El equipo aun no se ha conectado'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Comandos pendientes">
+                    <Tag color={equipo.comandos_pendientes > 0 ? 'orange' : 'default'}>
+                      {equipo.comandos_pendientes}
+                    </Tag>
+                  </Descriptions.Item>
+                </>
+              )}
             </Descriptions>
           </Card>
         </Col>
@@ -232,14 +309,16 @@ export default function Dispositivo() {
         <Col xs={24} lg={10}>
           <Card title="Operaciones">
             <Space orientation="vertical" style={{ width: '100%' }} size="middle">
-              <Button
-                block
-                icon={<ApiOutlined />}
-                loading={probar.isPending}
-                onClick={() => probar.mutate()}
-              >
-                Probar conexion
-              </Button>
+              {!modoADMS && (
+                <Button
+                  block
+                  icon={<ApiOutlined />}
+                  loading={probar.isPending}
+                  onClick={() => probar.mutate()}
+                >
+                  Probar conexion
+                </Button>
+              )}
 
               {editable && (
                 <>
@@ -249,7 +328,7 @@ export default function Dispositivo() {
                     loading={subirEmpleados.isPending}
                     onClick={() => subirEmpleados.mutate()}
                   >
-                    Subir empleados pendientes
+                    {modoADMS ? 'Encolar empleados pendientes' : 'Subir empleados pendientes'}
                   </Button>
 
                   <Button
@@ -258,7 +337,7 @@ export default function Dispositivo() {
                     loading={respaldarHuellas.isPending}
                     onClick={() => respaldarHuellas.mutate()}
                   >
-                    Respaldar huellas del equipo
+                    {modoADMS ? 'Solicitar reenvio de huellas' : 'Respaldar huellas del equipo'}
                   </Button>
 
                   <div>
@@ -269,6 +348,7 @@ export default function Dispositivo() {
                         value={desde}
                         onChange={setDesde}
                         format="DD/MM/YYYY"
+                        disabled={modoADMS}
                       />
                       <Button
                         type="primary"
@@ -277,27 +357,30 @@ export default function Dispositivo() {
                         loading={descargar.isPending}
                         onClick={() => descargar.mutate()}
                       >
-                        Descargar
+                        {modoADMS ? 'Solicitar reenvio' : 'Descargar'}
                       </Button>
                     </Space.Compact>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Sin fecha descarga desde la ultima sincronizacion. Repetir un rango no
-                      duplica marcaciones.
+                      {modoADMS
+                        ? 'En ADMS las marcaciones llegan solas cada vez que el equipo consulta al servidor.'
+                        : 'Sin fecha descarga desde la ultima sincronizacion. Repetir un rango no duplica marcaciones.'}
                     </Text>
                   </div>
 
-                  <Button
-                    block
-                    icon={<FieldTimeOutlined />}
-                    loading={sincronizarHora.isPending}
-                    onClick={() => sincronizarHora.mutate()}
-                  >
-                    Sincronizar hora del equipo
-                  </Button>
+                  {!modoADMS && (
+                    <Button
+                      block
+                      icon={<FieldTimeOutlined />}
+                      loading={sincronizarHora.isPending}
+                      onClick={() => sincronizarHora.mutate()}
+                    >
+                      Sincronizar hora del equipo
+                    </Button>
+                  )}
                 </>
               )}
 
-              {admin && (
+              {admin && !modoADMS && (
                 <Button block danger icon={<ClockCircleOutlined />} onClick={confirmarLimpieza}>
                   Limpiar marcaciones del equipo
                 </Button>
@@ -306,6 +389,23 @@ export default function Dispositivo() {
           </Card>
         </Col>
       </Row>
+
+      {modoADMS && equipo.numero_serie && !equipo.ultima_conexion_adms && (
+        <Alert
+          type="warning"
+          showIcon
+          title="El equipo aun no se ha conectado por ADMS"
+          description={
+            <>
+              Verifique en el menu del equipo (Comunicacion / Servidor en la nube) que la
+              direccion del servidor apunte a esta maquina y que ADMS este habilitado. El
+              equipo debe enviar sus datos a la ruta <code>/iclock/cdata</code>. Revise la
+              pestana &quot;Peticiones ADMS&quot; para ver si algo esta llegando y por que se
+              rechaza.
+            </>
+          }
+        />
+      )}
 
       <Alert
         type="info"
@@ -320,52 +420,223 @@ export default function Dispositivo() {
         }
       />
 
-      <Card title="Historial de sincronizaciones" styles={{ body: { padding: 0 } }}>
-        <Table<RegistroSincronizacion>
-          rowKey="id"
-          size="small"
-          dataSource={sincronizaciones?.results ?? []}
-          scroll={{ x: 900 }}
-          pagination={{ pageSize: 10 }}
-          expandable={{
-            expandedRowRender: (fila) => (
-              <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                {JSON.stringify(fila.detalle, null, 2)}
-              </pre>
+      <Tabs
+        defaultActiveKey="sincronizaciones"
+        items={[
+          {
+            key: 'sincronizaciones',
+            label: 'Historial de sincronizaciones',
+            children: (
+              <Card styles={{ body: { padding: 0 } }}>
+                <Table<RegistroSincronizacion>
+                  rowKey="id"
+                  size="small"
+                  dataSource={sincronizaciones?.results ?? []}
+                  scroll={{ x: 900 }}
+                  pagination={{ pageSize: 10 }}
+                  expandable={{
+                    expandedRowRender: (fila) => (
+                      <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                        {JSON.stringify(fila.detalle, null, 2)}
+                      </pre>
+                    ),
+                    rowExpandable: (fila) => !!fila.detalle,
+                  }}
+                  columns={[
+                    {
+                      title: 'Inicio',
+                      dataIndex: 'inicio',
+                      width: 150,
+                      render: (v: string) => dayjs(v).format('DD/MM/YYYY HH:mm:ss'),
+                    },
+                    { title: 'Operacion', dataIndex: 'operacion_display' },
+                    {
+                      title: 'Estado',
+                      dataIndex: 'estado_display',
+                      width: 110,
+                      render: (texto: string, fila) => (
+                        <Badge status={COLOR_ESTADO_SYNC[fila.estado] as never} text={texto} />
+                      ),
+                    },
+                    {
+                      title: 'Procesados',
+                      dataIndex: 'registros_procesados',
+                      width: 100,
+                      align: 'right',
+                    },
+                    { title: 'Nuevos', dataIndex: 'registros_nuevos', width: 80, align: 'right' },
+                    {
+                      title: 'Fallidos',
+                      dataIndex: 'registros_fallidos',
+                      width: 80,
+                      align: 'right',
+                    },
+                    {
+                      title: 'Duracion',
+                      dataIndex: 'duracion_segundos',
+                      width: 90,
+                      align: 'right',
+                      render: (v: number | null) => (v !== null ? `${v.toFixed(1)} s` : '-'),
+                    },
+                    { title: 'Ejecutado por', dataIndex: 'ejecutado_por_nombre', ellipsis: true },
+                    { title: 'Mensaje', dataIndex: 'mensaje', ellipsis: true },
+                  ]}
+                />
+              </Card>
             ),
-            rowExpandable: (fila) => !!fila.detalle,
-          }}
-          columns={[
-            {
-              title: 'Inicio',
-              dataIndex: 'inicio',
-              width: 150,
-              render: (v: string) => dayjs(v).format('DD/MM/YYYY HH:mm:ss'),
-            },
-            { title: 'Operacion', dataIndex: 'operacion_display' },
-            {
-              title: 'Estado',
-              dataIndex: 'estado_display',
-              width: 110,
-              render: (texto: string, fila) => (
-                <Badge status={COLOR_ESTADO_SYNC[fila.estado] as never} text={texto} />
-              ),
-            },
-            { title: 'Procesados', dataIndex: 'registros_procesados', width: 100, align: 'right' },
-            { title: 'Nuevos', dataIndex: 'registros_nuevos', width: 80, align: 'right' },
-            { title: 'Fallidos', dataIndex: 'registros_fallidos', width: 80, align: 'right' },
-            {
-              title: 'Duracion',
-              dataIndex: 'duracion_segundos',
-              width: 90,
-              align: 'right',
-              render: (v: number | null) => (v !== null ? `${v.toFixed(1)} s` : '-'),
-            },
-            { title: 'Ejecutado por', dataIndex: 'ejecutado_por_nombre', ellipsis: true },
-            { title: 'Mensaje', dataIndex: 'mensaje', ellipsis: true },
-          ]}
-        />
-      </Card>
+          },
+          ...(modoADMS
+            ? [
+                {
+                  key: 'comandos',
+                  label: `Cola de comandos${
+                    equipo.comandos_pendientes ? ` (${equipo.comandos_pendientes})` : ''
+                  }`,
+                  children: (
+                    <Card
+                      styles={{ body: { padding: 0 } }}
+                      extra={
+                        admin ? (
+                          <Button
+                            size="small"
+                            icon={<ReloadOutlined />}
+                            loading={reintentarFallidos.isPending}
+                            onClick={() => reintentarFallidos.mutate()}
+                          >
+                            Reintentar fallidos
+                          </Button>
+                        ) : undefined
+                      }
+                    >
+                      <Table<ComandoDispositivo>
+                        rowKey="id"
+                        size="small"
+                        dataSource={comandos?.results ?? []}
+                        scroll={{ x: 900 }}
+                        pagination={{ pageSize: 10 }}
+                        locale={{
+                          emptyText:
+                            'Sin comandos en cola. Apareceran aqui al subir empleados o ' +
+                            'solicitar datos mientras el equipo trabaje en modo ADMS.',
+                        }}
+                        columns={[
+                          {
+                            title: 'Creado',
+                            dataIndex: 'creado_en',
+                            width: 150,
+                            render: (v: string) => dayjs(v).format('DD/MM/YYYY HH:mm:ss'),
+                          },
+                          { title: 'Tipo', dataIndex: 'tipo_display' },
+                          { title: 'Empleado', dataIndex: 'empleado_nombre', ellipsis: true },
+                          {
+                            title: 'Estado',
+                            dataIndex: 'estado_display',
+                            width: 120,
+                            render: (texto: string, fila) => (
+                              <Badge
+                                status={COLOR_ESTADO_COMANDO[fila.estado] as never}
+                                text={texto}
+                              />
+                            ),
+                          },
+                          { title: 'Retorno', dataIndex: 'codigo_retorno', width: 80 },
+                          { title: 'Respuesta', dataIndex: 'respuesta', ellipsis: true },
+                          ...(admin
+                            ? [
+                                {
+                                  title: '',
+                                  key: 'acciones',
+                                  width: 90,
+                                  render: (_: unknown, fila: ComandoDispositivo) =>
+                                    fila.estado === 'pendiente' ? (
+                                      <Button
+                                        size="small"
+                                        danger
+                                        loading={cancelarComando.isPending}
+                                        onClick={() => cancelarComando.mutate(fila.id)}
+                                      >
+                                        Cancelar
+                                      </Button>
+                                    ) : null,
+                                },
+                              ]
+                            : []),
+                        ]}
+                      />
+                    </Card>
+                  ),
+                },
+                ...(admin
+                  ? [
+                      {
+                        key: 'peticiones',
+                        label: 'Peticiones ADMS',
+                        children: (
+                          <Card styles={{ body: { padding: 0 } }}>
+                            <Table<PeticionADMS>
+                              rowKey="id"
+                              size="small"
+                              dataSource={peticionesADMS?.results ?? []}
+                              scroll={{ x: 1000 }}
+                              pagination={{ pageSize: 15 }}
+                              locale={{
+                                emptyText:
+                                  'Todavia no llego ninguna peticion. Verifique la ' +
+                                  'configuracion del servidor en el menu del equipo.',
+                              }}
+                              expandable={{
+                                expandedRowRender: (fila) => (
+                                  <div style={{ fontSize: 12 }}>
+                                    <Text strong>Cuerpo de la peticion:</Text>
+                                    <pre style={{ whiteSpace: 'pre-wrap', margin: '4px 0 12px' }}>
+                                      {fila.cuerpo || '(vacio)'}
+                                    </pre>
+                                    <Text strong>Respuesta enviada:</Text>
+                                    <pre style={{ whiteSpace: 'pre-wrap', margin: '4px 0' }}>
+                                      {fila.respuesta || '(vacia)'}
+                                    </pre>
+                                  </div>
+                                ),
+                              }}
+                              columns={[
+                                {
+                                  title: 'Recibida',
+                                  dataIndex: 'recibida_en',
+                                  width: 150,
+                                  render: (v: string) => dayjs(v).format('DD/MM/YYYY HH:mm:ss'),
+                                },
+                                { title: 'Ruta', dataIndex: 'ruta', width: 160 },
+                                { title: 'Metodo', dataIndex: 'metodo', width: 80 },
+                                { title: 'Serie', dataIndex: 'numero_serie', width: 140 },
+                                { title: 'IP origen', dataIndex: 'ip_origen', width: 120 },
+                                {
+                                  title: 'Aceptada',
+                                  dataIndex: 'aceptada',
+                                  width: 100,
+                                  render: (v: boolean) =>
+                                    v ? (
+                                      <Tag color="green">Si</Tag>
+                                    ) : (
+                                      <Tag color="red">Rechazada</Tag>
+                                    ),
+                                },
+                                {
+                                  title: 'Registros',
+                                  dataIndex: 'registros_procesados',
+                                  width: 90,
+                                  align: 'right',
+                                },
+                              ]}
+                            />
+                          </Card>
+                        ),
+                      },
+                    ]
+                  : []),
+              ]
+            : []),
+        ]}
+      />
 
       <Modal
         open={configAbierta}
@@ -375,6 +646,7 @@ export default function Dispositivo() {
         confirmLoading={guardarConfig.isPending}
         okText="Guardar"
         cancelText="Cancelar"
+        width={640}
       >
         <Alert
           type="warning"
@@ -382,11 +654,7 @@ export default function Dispositivo() {
           style={{ marginBottom: 16 }}
           title="Cambiar la IP redirige todas las operaciones a otro equipo."
         />
-        <Form
-          form={formConfig}
-          layout="vertical"
-          onFinish={(v) => guardarConfig.mutate(v)}
-        >
+        <Form form={formConfig} layout="vertical" onFinish={(v) => guardarConfig.mutate(v)}>
           <Form.Item name="nombre" label="Nombre" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
@@ -435,9 +703,50 @@ export default function Dispositivo() {
             name="force_udp"
             label="Forzar UDP"
             valuePropName="checked"
-            tooltip="Active solo si el equipo no responde por TCP."
+            tooltip="Active solo si el equipo no responde por TCP en modo SDK."
           >
             <Switch />
+          </Form.Item>
+
+          <Alert
+            type="info"
+            showIcon
+            style={{ margin: '8px 0 16px' }}
+            title="Comunicacion con el equipo"
+            description={
+              'SDK: el servidor llama al equipo por el puerto configurado arriba (requiere ' +
+              'que el equipo tenga ese puerto abierto). ADMS: el equipo llama al servidor; ' +
+              'requiere su numero de serie y que su menu de comunicacion apunte a esta maquina.'
+            }
+          />
+          <Form.Item name="modo" label="Modo de comunicacion" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'sdk', label: 'SDK (el servidor consulta al equipo)' },
+                { value: 'adms', label: 'ADMS / Push (el equipo envia los datos)' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name="numero_serie"
+            label="Numero de serie del equipo"
+            tooltip="Es la unica identificacion que presenta el equipo al usar ADMS: obligatorio para habilitarlo."
+          >
+            <Input placeholder="Ej. COVG215160131" />
+          </Form.Item>
+          <Form.Item
+            name="adms_habilitado"
+            label="Aceptar conexiones ADMS de este equipo"
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            name="adms_ip_permitida"
+            label="IP autorizada para ADMS (recomendado)"
+            tooltip="Si se indica, solo se aceptan peticiones ADMS que vengan de esta IP exacta."
+          >
+            <Input placeholder="192.168.18.202" />
           </Form.Item>
         </Form>
       </Modal>

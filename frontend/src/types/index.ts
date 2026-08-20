@@ -125,6 +125,8 @@ export interface Empleado extends EmpleadoLista {
   turno_actual: { id: number; nombre: string } | null;
 }
 
+export type ModoDispositivo = 'sdk' | 'adms';
+
 export interface Dispositivo {
   id: number;
   nombre: string;
@@ -132,6 +134,12 @@ export interface Dispositivo {
   puerto: number;
   timeout: number;
   force_udp: boolean;
+  modo: ModoDispositivo;
+  modo_display: string;
+  adms_habilitado: boolean;
+  adms_ip_permitida: string | null;
+  ultima_conexion_adms: string | null;
+  comandos_pendientes: number;
   sede: number | null;
   sede_nombre: string | null;
   ubicacion: string;
@@ -148,6 +156,41 @@ export interface Dispositivo {
   ultima_conexion: string | null;
   ultima_sincronizacion_marcaciones: string | null;
   activo: boolean;
+}
+
+export interface ComandoDispositivo {
+  id: number;
+  dispositivo: number;
+  dispositivo_nombre: string;
+  tipo: string;
+  tipo_display: string;
+  estado: 'pendiente' | 'enviado' | 'confirmado' | 'fallido';
+  estado_display: string;
+  empleado: number | null;
+  empleado_codigo: string | null;
+  empleado_nombre: string | null;
+  codigo_retorno: number | null;
+  respuesta: string;
+  creado_por_nombre: string;
+  creado_en: string;
+  enviado_en: string | null;
+  confirmado_en: string | null;
+}
+
+export interface PeticionADMS {
+  id: number;
+  dispositivo: number | null;
+  dispositivo_nombre: string | null;
+  numero_serie: string;
+  ruta: string;
+  metodo: string;
+  parametros: Record<string, unknown> | null;
+  cuerpo: string;
+  respuesta: string;
+  ip_origen: string | null;
+  aceptada: boolean;
+  registros_procesados: number;
+  recibida_en: string;
 }
 
 export interface RegistroSincronizacion {

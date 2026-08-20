@@ -5,6 +5,7 @@ import type {
   Area,
   AsignacionTurno,
   Cargo,
+  ComandoDispositivo,
   ComparativoDepartamento,
   Departamento,
   Dispositivo,
@@ -16,6 +17,7 @@ import type {
   Horario,
   Marcacion,
   Paginado,
+  PeticionADMS,
   Permiso,
   PrevisualizacionReporte,
   PuntoTendencia,
@@ -117,6 +119,21 @@ export const dispositivosApi = {
   sincronizaciones: (params?: Params) =>
     api
       .get<Paginado<RegistroSincronizacion>>('/dispositivos/sincronizaciones/', { params })
+      .then((r) => r.data),
+
+  comandos: (params?: Params) =>
+    api
+      .get<Paginado<ComandoDispositivo>>('/dispositivos/comandos/', { params })
+      .then((r) => r.data),
+  cancelarComando: (id: number) => api.post(`/dispositivos/comandos/${id}/cancelar/`),
+  reintentarComandosFallidos: (dispositivoId?: number) =>
+    api
+      .post('/dispositivos/comandos/reintentar-fallidos/', { dispositivo: dispositivoId })
+      .then((r) => r.data),
+
+  peticionesADMS: (params?: Params) =>
+    api
+      .get<Paginado<PeticionADMS>>('/dispositivos/peticiones-adms/', { params })
       .then((r) => r.data),
 };
 
