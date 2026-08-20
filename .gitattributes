@@ -1,0 +1,21 @@
+# Normaliza los finales de linea a LF en el repositorio.
+# Evita que el mismo archivo aparezca como modificado por completo al abrirlo
+# desde Windows y desde el servidor Linux de produccion.
+* text=auto eol=lf
+
+# Los scripts de Windows necesitan CRLF para ejecutarse correctamente.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binarios: git no debe tocarlos.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.xlsx binary
+*.rar binary
+*.zip binary
+*.sqlite3 binary

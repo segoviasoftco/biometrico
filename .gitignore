@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Django
+*.sqlite3
+db.sqlite3
+/backend/media/
+/backend/staticfiles/
+/backend/logs/
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Editores
+.vscode/
+.idea/
+*.swp
+
+# Sistema operativo
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Celery
+celerybeat-schedule*

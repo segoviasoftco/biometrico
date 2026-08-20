@@ -1,0 +1,31 @@
+# Core
+Django==5.1.5
+djangorestframework==3.15.2
+django-cors-headers==4.6.0
+django-filter==24.3
+djangorestframework-simplejwt==5.3.1
+
+# Base de datos
+psycopg[binary]==3.2.3
+
+# Dispositivo biometrico ZKTeco
+pyzk==0.9
+
+# Tareas asincronas
+celery==5.4.0
+redis==5.2.1
+django-celery-beat==2.7.0
+django-celery-results==2.5.1
+
+# Reportes
+openpyxl==3.1.5
+reportlab==4.2.5
+
+# Utilidades
+python-decouple==3.8
+Pillow==11.1.0
+python-dateutil==2.9.0.post0
+
+# Desarrollo / pruebas
+pytest==8.3.4
+pytest-django==4.9.0
