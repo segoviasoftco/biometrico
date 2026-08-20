@@ -131,6 +131,45 @@ class Dispositivo(models.Model):
         return f"{self.nombre} ({self.ip}:{self.puerto})"
 
 
+class UsuarioDispositivo(models.Model):
+    """Usuario tal como lo reporta el equipo por ADMS (bloque OPERLOG).
+
+    En SDK los usuarios se leen en vivo con `get_users()` porque el servidor
+    puede llamar al equipo. En ADMS el servidor no puede pedir nada: solo se
+    entera de quien hay en el equipo cuando este envia el bloque OPERLOG (al
+    enrolar a alguien o al responder a un `SOLICITAR_DATOS`). Esta tabla es el
+    ultimo estado conocido de esos usuarios, para poder conciliarlos contra el
+    padron sin depender de que el equipo este respondiendo en ese instante.
+    """
+
+    dispositivo = models.ForeignKey(
+        Dispositivo,
+        verbose_name="dispositivo",
+        on_delete=models.CASCADE,
+        related_name="usuarios_reportados",
+    )
+    codigo_empleado = models.CharField("PIN reportado por el equipo", max_length=20)
+    nombre = models.CharField("nombre en el equipo", max_length=100, blank=True)
+    privilegio = models.IntegerField("privilegio", default=0)
+    tarjeta = models.CharField("tarjeta", max_length=30, blank=True)
+    grupo = models.CharField("grupo", max_length=20, blank=True)
+    actualizado_en = models.DateTimeField("actualizado en", auto_now=True)
+
+    class Meta:
+        verbose_name = "usuario reportado por el equipo"
+        verbose_name_plural = "usuarios reportados por el equipo"
+        ordering = ["codigo_empleado"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dispositivo", "codigo_empleado"],
+                name="usuario_dispositivo_unico",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.codigo_empleado} ({self.nombre}) en {self.dispositivo}"
+
+
 class RegistroSincronizacion(models.Model):
     """Bitacora de cada operacion realizada contra un dispositivo.
 

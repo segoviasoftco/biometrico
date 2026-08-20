@@ -212,6 +212,24 @@ export interface RegistroSincronizacion {
   duracion_segundos: number | null;
 }
 
+export interface UsuarioEnEquipo {
+  uid: number | null;
+  user_id: string;
+  nombre: string;
+  privilegio: number;
+  tarjeta: string;
+  registrado_en_sistema: boolean;
+  actualizado_en?: string;
+}
+
+export interface ConciliacionEmpleadosEquipo {
+  total_en_equipo: number;
+  usuarios: UsuarioEnEquipo[];
+  solo_en_equipo: string[];
+  solo_en_sistema: string[];
+  fuente: 'sdk' | 'adms';
+}
+
 export interface Horario {
   id: number;
   nombre: string;

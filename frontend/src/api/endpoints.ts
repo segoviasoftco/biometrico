@@ -7,6 +7,7 @@ import type {
   Cargo,
   ComandoDispositivo,
   ComparativoDepartamento,
+  ConciliacionEmpleadosEquipo,
   Departamento,
   Dispositivo,
   Empleado,
@@ -109,7 +110,15 @@ export const dispositivosApi = {
   subirEmpleados: (id: number, solo_pendientes = true) =>
     api.post(`/dispositivos/${id}/subir-empleados/`, { solo_pendientes }).then((r) => r.data),
   empleadosEnEquipo: (id: number) =>
-    api.get(`/dispositivos/${id}/empleados-en-equipo/`).then((r) => r.data),
+    api
+      .get<ConciliacionEmpleadosEquipo>(`/dispositivos/${id}/empleados-en-equipo/`)
+      .then((r) => r.data),
+  solicitarEmpleados: (id: number) =>
+    api.post(`/dispositivos/${id}/solicitar-empleados/`).then((r) => r.data),
+  descargarEmpleadosCSV: (id: number) =>
+    api
+      .get(`/dispositivos/${id}/empleados-en-equipo-csv/`, { responseType: 'blob' })
+      .then((r) => r.data as Blob),
   respaldarHuellas: (id: number) =>
     api.post(`/dispositivos/${id}/respaldar-huellas/`).then((r) => r.data),
   descargarMarcaciones: (id: number, datos: { desde?: string; procesar?: boolean }) =>

@@ -111,11 +111,42 @@ def registrar_operaciones(dispositivo, datos):
     """Actualiza el estado biometrico a partir del bloque OPERLOG."""
     resumen = {"huellas": 0, "rostros": 0, "usuarios": 0}
 
+    resumen["usuarios"] = _guardar_usuarios(dispositivo, datos.get("usuarios", []))
     resumen["huellas"] = _guardar_huellas(dispositivo, datos.get("huellas", []))
     resumen["rostros"] = _marcar_rostros(datos.get("rostros", []))
-    resumen["usuarios"] = len(datos.get("usuarios", []))
 
     return resumen
+
+
+def _guardar_usuarios(dispositivo, usuarios):
+    """Guarda el ultimo estado conocido de los usuarios que reporta el equipo.
+
+    No crea ni actualiza `Empleado`: solo deja constancia de lo que el equipo
+    dice tener, para que la conciliacion (pantalla Dispositivo) pueda mostrar
+    quien esta en el equipo y no en el sistema, sin depender de una conexion
+    SDK que en modo ADMS no existe.
+    """
+    from apps.devices.models import UsuarioDispositivo
+
+    guardados = 0
+    for usuario in usuarios:
+        codigo = (usuario.get("codigo_empleado") or "").strip()
+        if not codigo:
+            continue
+
+        UsuarioDispositivo.objects.update_or_create(
+            dispositivo=dispositivo,
+            codigo_empleado=codigo,
+            defaults={
+                "nombre": usuario.get("nombre", ""),
+                "privilegio": usuario.get("privilegio", 0),
+                "tarjeta": usuario.get("tarjeta", ""),
+                "grupo": usuario.get("grupo", ""),
+            },
+        )
+        guardados += 1
+
+    return guardados
 
 
 def _guardar_huellas(dispositivo, huellas):

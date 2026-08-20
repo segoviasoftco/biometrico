@@ -1,7 +1,9 @@
 """API de dispositivos biometricos."""
 
+import csv
 from datetime import datetime, time
 
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -30,6 +32,36 @@ from apps.devices.serializers import (
 )
 from apps.devices.services.sincronizacion import descargar_y_procesar, ejecutar_operacion
 from apps.employees.models import Empleado
+
+
+def _conciliar_empleados_equipo(dispositivo):
+    """Arma el mismo reporte de conciliacion que la via SDK, a partir de lo
+    ultimo que el equipo reporto por ADMS (tabla `UsuarioDispositivo`).
+
+    No consulta al equipo en vivo -- en ADMS el servidor no puede hacerlo --
+    asi que el resultado es tan reciente como el ultimo `OPERLOG` recibido.
+    """
+    reportados = list(dispositivo.usuarios_reportados.all())
+    codigos_sistema = set(Empleado.objects.values_list("codigo_empleado", flat=True))
+    codigos_equipo = {u.codigo_empleado for u in reportados}
+
+    return {
+        "total_en_equipo": len(reportados),
+        "usuarios": [
+            {
+                "uid": None,
+                "user_id": u.codigo_empleado,
+                "nombre": u.nombre,
+                "privilegio": u.privilegio,
+                "tarjeta": u.tarjeta,
+                "registrado_en_sistema": u.codigo_empleado in codigos_sistema,
+                "actualizado_en": u.actualizado_en,
+            }
+            for u in reportados
+        ],
+        "solo_en_equipo": sorted(codigos_equipo - codigos_sistema),
+        "solo_en_sistema": sorted(codigos_sistema - codigos_equipo),
+    }
 
 
 class DispositivoViewSet(viewsets.ModelViewSet):
@@ -158,8 +190,19 @@ class DispositivoViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"], url_path="empleados-en-equipo")
     def empleados_en_equipo(self, request, pk=None):
-        """Concilia los usuarios del equipo contra el maestro de empleados."""
+        """Concilia los usuarios del equipo contra el maestro de empleados.
+
+        No crea ni borra empleados: solo reporta las diferencias para que un
+        responsable decida, porque un alta o baja automatica a partir del
+        equipo podria borrar datos laborales.
+        """
         dispositivo = self.get_object()
+
+        if dispositivo.modo == Dispositivo.Modo.ADMS:
+            resultado = _conciliar_empleados_equipo(dispositivo)
+            resultado["fuente"] = "adms"
+            return Response(resultado)
+
         registro, resultado = ejecutar_operacion(
             dispositivo,
             RegistroSincronizacion.Operacion.DESCARGAR_EMPLEADOS,
@@ -168,7 +211,92 @@ class DispositivoViewSet(viewsets.ModelViewSet):
         )
         if resultado is None:
             return Response({"detalle": registro.mensaje}, status=status.HTTP_502_BAD_GATEWAY)
+        resultado["fuente"] = "sdk"
         return Response(resultado)
+
+    @action(detail=True, methods=["post"], url_path="solicitar-empleados")
+    def solicitar_empleados(self, request, pk=None):
+        """En ADMS, pide al equipo que reenvie su padron de usuarios.
+
+        El servidor no puede leer los usuarios del equipo bajo demanda como en
+        SDK: encola el mismo comando de reenvio que usan las huellas y las
+        marcaciones, y el resultado llega despues por `/iclock/cdata` (bloque
+        OPERLOG), que ahora se guarda en `UsuarioDispositivo`.
+        """
+        dispositivo = self.get_object()
+        if dispositivo.modo != Dispositivo.Modo.ADMS:
+            return Response(
+                {"detalle": "Este equipo no esta en modo ADMS; use 'empleados-en-equipo'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        adms_commands.encolar(
+            dispositivo,
+            ComandoDispositivo.Tipo.SOLICITAR_DATOS,
+            adms_commands.COMANDOS_SIMPLES[ComandoDispositivo.Tipo.SOLICITAR_DATOS],
+            usuario=request.user,
+        )
+        return Response(
+            {
+                "detalle": (
+                    "Se solicito al equipo el reenvio de su padron de usuarios. La lista se "
+                    "actualizara cuando el equipo responda."
+                ),
+                "resultado": {"encolado": True},
+            }
+        )
+
+    @action(detail=True, methods=["get"], url_path="empleados-en-equipo-csv")
+    def empleados_en_equipo_csv(self, request, pk=None):
+        """Exporta a CSV la conciliacion de empleados del equipo.
+
+        Pensado para poder revisar o cargar los datos fuera del sistema (por
+        ejemplo, para preparar un alta masiva en la base de datos) sin crear
+        empleados automaticamente.
+        """
+        dispositivo = self.get_object()
+
+        if dispositivo.modo == Dispositivo.Modo.ADMS:
+            resultado = _conciliar_empleados_equipo(dispositivo)
+        else:
+            registro, resultado = ejecutar_operacion(
+                dispositivo,
+                RegistroSincronizacion.Operacion.DESCARGAR_EMPLEADOS,
+                lambda servicio: servicio.descargar_empleados(),
+                usuario=request.user,
+            )
+            if resultado is None:
+                return Response({"detalle": registro.mensaje}, status=status.HTTP_502_BAD_GATEWAY)
+
+        respuesta = HttpResponse(content_type="text/csv; charset=utf-8")
+        marca = timezone.localtime().strftime("%Y%m%d_%H%M")
+        respuesta["Content-Disposition"] = (
+            f'attachment; filename="empleados_equipo_{dispositivo.id}_{marca}.csv"'
+        )
+        # BOM para que Excel detecte UTF-8 en vez de interpretar tildes mal.
+        respuesta.write("﻿")
+        escritor = csv.writer(respuesta, delimiter=";")
+        escritor.writerow(
+            ["codigo_empleado", "nombre_en_equipo", "privilegio", "tarjeta", "registrado_en_sistema"]
+        )
+        for usuario in resultado["usuarios"]:
+            escritor.writerow(
+                [
+                    usuario["user_id"],
+                    usuario["nombre"],
+                    usuario["privilegio"],
+                    usuario["tarjeta"],
+                    "si" if usuario["registrado_en_sistema"] else "no",
+                ]
+            )
+
+        registrar_auditoria(
+            accion=RegistroAuditoria.Accion.SINCRONIZAR,
+            modelo="Dispositivo",
+            objeto_id=dispositivo.id,
+            descripcion=f"Exportacion CSV de empleados del equipo ({len(resultado['usuarios'])} usuarios)",
+        )
+        return respuesta
 
     # ------------------------------------------------------------------
     # Biometria

@@ -3,9 +3,11 @@ import {
   CloudDownloadOutlined,
   CloudUploadOutlined,
   ClockCircleOutlined,
+  DownloadOutlined,
   FieldTimeOutlined,
   ReloadOutlined,
   SafetyOutlined,
+  TeamOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -42,6 +44,7 @@ import type {
   Dispositivo as TipoDispositivo,
   PeticionADMS,
   RegistroSincronizacion,
+  UsuarioEnEquipo,
 } from '../types';
 
 const { Title, Text, Paragraph } = Typography;
@@ -70,6 +73,7 @@ export default function Dispositivo() {
 
   const [configAbierta, setConfigAbierta] = useState(false);
   const [desde, setDesde] = useState<Dayjs | null>(null);
+  const [empleadosModalAbierto, setEmpleadosModalAbierto] = useState(false);
 
   const { data: dispositivos, isLoading } = useQuery({
     queryKey: ['dispositivos'],
@@ -97,6 +101,17 @@ export default function Dispositivo() {
     queryFn: () => dispositivosApi.peticionesADMS({ dispositivo: equipo?.id, page_size: 30 }),
     enabled: !!equipo && admin && modoADMS,
     refetchInterval: 15_000,
+  });
+
+  const {
+    data: conciliacionEmpleados,
+    isFetching: cargandoEmpleadosEquipo,
+    refetch: refrescarEmpleadosEquipo,
+  } = useQuery({
+    queryKey: ['empleados-en-equipo', equipo?.id],
+    queryFn: () => dispositivosApi.empleadosEnEquipo(equipo!.id),
+    enabled: !!equipo && empleadosModalAbierto,
+    refetchInterval: empleadosModalAbierto && modoADMS ? 15_000 : false,
   });
 
   const invalidar = () => {
@@ -138,6 +153,36 @@ export default function Dispositivo() {
     'Huellas respaldadas.',
     true,
   );
+
+  const solicitarEmpleados = useMutation({
+    mutationFn: () => dispositivosApi.solicitarEmpleados(equipo!.id),
+    onSuccess: (r: { detalle?: string }) => {
+      message.success(r?.detalle ?? 'Se solicito el padron al equipo.');
+      refrescarEmpleadosEquipo();
+    },
+    onError: (e) => message.error(mensajeError(e)),
+  });
+
+  const [descargandoCSV, setDescargandoCSV] = useState(false);
+  const descargarCSV = async () => {
+    if (!equipo) return;
+    setDescargandoCSV(true);
+    try {
+      const blob = await dispositivosApi.descargarEmpleadosCSV(equipo.id);
+      const url = window.URL.createObjectURL(blob);
+      const enlace = document.createElement('a');
+      enlace.href = url;
+      enlace.download = `empleados_equipo_${equipo.id}_${dayjs().format('YYYYMMDD_HHmm')}.csv`;
+      document.body.appendChild(enlace);
+      enlace.click();
+      enlace.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      message.error(mensajeError(e));
+    } finally {
+      setDescargandoCSV(false);
+    }
+  };
 
   const descargar = useMutation({
     mutationFn: () =>
@@ -338,6 +383,14 @@ export default function Dispositivo() {
                     onClick={() => respaldarHuellas.mutate()}
                   >
                     {modoADMS ? 'Solicitar reenvio de huellas' : 'Respaldar huellas del equipo'}
+                  </Button>
+
+                  <Button
+                    block
+                    icon={<TeamOutlined />}
+                    onClick={() => setEmpleadosModalAbierto(true)}
+                  >
+                    Descargar empleados
                   </Button>
 
                   <div>
@@ -749,6 +802,105 @@ export default function Dispositivo() {
             <Input placeholder="192.168.18.202" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        open={empleadosModalAbierto}
+        title="Empleados en el equipo"
+        onCancel={() => setEmpleadosModalAbierto(false)}
+        width={820}
+        footer={[
+          <Button key="cerrar" onClick={() => setEmpleadosModalAbierto(false)}>
+            Cerrar
+          </Button>,
+          <Button
+            key="csv"
+            type="primary"
+            icon={<DownloadOutlined />}
+            loading={descargandoCSV}
+            disabled={!conciliacionEmpleados?.usuarios.length}
+            onClick={descargarCSV}
+          >
+            Exportar CSV
+          </Button>,
+        ]}
+      >
+        <Space orientation="vertical" style={{ width: '100%' }} size="middle">
+          {modoADMS && (
+            <Alert
+              type="info"
+              showIcon
+              title="Modo ADMS: el equipo no puede consultarse en vivo"
+              description={
+                <Space orientation="vertical" size={4}>
+                  <Text>
+                    Esta lista es el ultimo padron que el equipo envio (bloque OPERLOG). Si
+                    parece desactualizada, solicite el reenvio y espere a que el equipo consulte
+                    al servidor.
+                  </Text>
+                  {editable && (
+                    <Button
+                      size="small"
+                      icon={<ReloadOutlined />}
+                      loading={solicitarEmpleados.isPending}
+                      onClick={() => solicitarEmpleados.mutate()}
+                    >
+                      Solicitar padron al equipo
+                    </Button>
+                  )}
+                </Space>
+              }
+            />
+          )}
+
+          {conciliacionEmpleados && (
+            <Space size="large">
+              <Text>
+                En el equipo: <b>{conciliacionEmpleados.total_en_equipo}</b>
+              </Text>
+              <Text>
+                Solo en el equipo:{' '}
+                <b>{conciliacionEmpleados.solo_en_equipo.length}</b>
+              </Text>
+              <Text>
+                Solo en el sistema:{' '}
+                <b>{conciliacionEmpleados.solo_en_sistema.length}</b>
+              </Text>
+            </Space>
+          )}
+
+          <Table<UsuarioEnEquipo>
+            rowKey="user_id"
+            size="small"
+            loading={cargandoEmpleadosEquipo}
+            dataSource={conciliacionEmpleados?.usuarios ?? []}
+            pagination={{ pageSize: 8 }}
+            locale={{
+              emptyText: modoADMS
+                ? 'Aun no se recibio el padron del equipo. Solicitelo arriba.'
+                : 'El equipo no reporto usuarios.',
+            }}
+            columns={[
+              { title: 'Codigo', dataIndex: 'user_id', width: 100 },
+              { title: 'Nombre en el equipo', dataIndex: 'nombre', ellipsis: true },
+              { title: 'Privilegio', dataIndex: 'privilegio', width: 100 },
+              { title: 'Tarjeta', dataIndex: 'tarjeta', width: 100 },
+              {
+                title: 'En el sistema',
+                dataIndex: 'registrado_en_sistema',
+                width: 110,
+                render: (v: boolean) =>
+                  v ? <Tag color="green">Si</Tag> : <Tag color="orange">No</Tag>,
+              },
+            ]}
+          />
+
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Este panel no crea empleados automaticamente: solo muestra las diferencias. Use el
+            CSV para revisar o preparar el alta manual de los empleados marcados como
+            &quot;No&quot; en el sistema.
+          </Text>
+        </Space>
       </Modal>
     </Space>
   );
