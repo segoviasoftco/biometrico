@@ -29,6 +29,15 @@ def comando_actualizar_usuario(empleado):
 
     A diferencia del SDK, aqui no hace falta gestionar el `uid` de 16 bits: el
     protocolo identifica al usuario por su PIN, que es el codigo de empleado.
+
+    El comando confirma con `Return=0` (lo recibio y lo registro en su
+    OPERLOG) incluso cuando el equipo termina descartando el alta de su
+    padron real de usuarios: OPERLOG es un registro de operaciones, no
+    garantiza que haya quedado persistido. Comparando contra el `USER ...`
+    que el equipo emite para sus propios usuarios (via `/iclock/cdata`) se ve
+    que faltaban `Verify`, `ViceCard`, `StartDatetime` y `EndDatetime`; sin
+    ellos el firmware de este equipo acepta el comando pero no completa el
+    alta. Se agregan con los mismos valores que el equipo usa por defecto.
     """
     campos = [
         f"PIN={empleado.codigo_empleado}",
@@ -38,6 +47,10 @@ def comando_actualizar_usuario(empleado):
         f"Card={empleado.numero_tarjeta or ''}",
         "Grp=1",
         f"TZ={TZ_POR_DEFECTO}",
+        "Verify=-1",
+        "ViceCard=",
+        "StartDatetime=0",
+        "EndDatetime=0",
     ]
     return "DATA UPDATE USERINFO " + "\t".join(campos)
 
