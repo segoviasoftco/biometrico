@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from apps.accounts.permissions import FiltradoPorSedeMixin, LecturaTodosEscrituraRRHH
 from apps.audit.middleware import registrar_auditoria
 from apps.audit.models import RegistroAuditoria
+from apps.devices.adms import commands as adms_commands
 from apps.devices.models import Dispositivo, RegistroSincronizacion
 from apps.devices.services.zk_service import ErrorDispositivo, ServicioZK
 from apps.employees.models import Empleado
@@ -90,6 +91,27 @@ class EmpleadoViewSet(FiltradoPorSedeMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # En ADMS el servidor no puede iniciar la comunicacion: el empleado se
+        # deja en cola y el equipo lo recibe la proxima vez que consulte.
+        if dispositivo.modo == Dispositivo.Modo.ADMS:
+            adms_commands.encolar_empleados(dispositivo, [empleado], usuario=request.user)
+            registrar_auditoria(
+                accion=RegistroAuditoria.Accion.SINCRONIZAR,
+                modelo="Empleado",
+                objeto_id=empleado.id,
+                descripcion=f"Se encolo el empleado {empleado.codigo_empleado} para el equipo (modo ADMS)",
+            )
+            return Response(
+                {
+                    "detalle": (
+                        "Se encolo el empleado. El equipo lo recibira la proxima vez que "
+                        "consulte al servidor."
+                    ),
+                    "resultado": {"encolado": True, "procesados": 0, "fallidos": 0},
+                    "empleado": EmpleadoSerializer(empleado, context={"request": request}).data,
+                }
+            )
+
         registro = RegistroSincronizacion.objects.create(
             dispositivo=dispositivo,
             operacion=RegistroSincronizacion.Operacion.SUBIR_EMPLEADOS,
@@ -142,6 +164,30 @@ class EmpleadoViewSet(FiltradoPorSedeMixin, viewsets.ModelViewSet):
             return Response(
                 {"detalle": "No hay un dispositivo biometrico activo configurado."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if dispositivo.modo == Dispositivo.Modo.ADMS:
+            comandos = adms_commands.encolar_huellas(dispositivo, empleado, usuario=request.user)
+            if not comandos:
+                return Response(
+                    {"detalle": f"El empleado {empleado.codigo_empleado} no tiene huellas respaldadas validas para restaurar."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            registrar_auditoria(
+                accion=RegistroAuditoria.Accion.SINCRONIZAR,
+                modelo="Empleado",
+                objeto_id=empleado.id,
+                descripcion=f"Se encolaron {len(comandos)} huella(s) de {empleado.codigo_empleado} (modo ADMS)",
+            )
+            return Response(
+                {
+                    "detalle": (
+                        f"Se encolaron {len(comandos)} huella(s). El equipo las recibira la "
+                        "proxima vez que consulte al servidor."
+                    ),
+                    "encolado": True,
+                    "huellas_restauradas": len(comandos),
+                }
             )
 
         try:
