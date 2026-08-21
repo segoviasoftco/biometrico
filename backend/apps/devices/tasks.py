@@ -16,8 +16,13 @@ def sincronizar_marcaciones_task(dispositivo_id=None):
 
     La ejecuta Celery Beat cada 15 minutos. Un equipo caido no debe impedir que
     se sincronicen los demas, por eso los errores se registran y se continua.
+
+    Solo aplica a equipos en modo SDK: en ADMS las marcaciones llegan solas por
+    push (`/iclock/cdata`), asi que intentar aqui una conexion por el puerto
+    4370 -- que en ADMS esta cerrado a proposito -- solo generaria un fallo
+    cada 15 minutos sin ningun beneficio.
     """
-    dispositivos = Dispositivo.objects.filter(activo=True)
+    dispositivos = Dispositivo.objects.filter(activo=True, modo=Dispositivo.Modo.SDK)
     if dispositivo_id:
         dispositivos = dispositivos.filter(id=dispositivo_id)
 
@@ -48,12 +53,17 @@ def sincronizar_hora_task():
 
     Se ejecuta bajo demanda; conviene programarla si el equipo tiende a
     desfasarse, porque un reloj corrido genera tardanzas inexistentes.
+
+    Solo aplica a equipos en modo SDK. En ADMS el equipo no expone el puerto
+    4370 y ademas ya recibe su zona horaria en cada handshake
+    (`TimeZone=` en `devices/adms/views.py`), asi que no hace falta sincronizar
+    la hora por este camino.
     """
     from apps.devices.models import RegistroSincronizacion
     from apps.devices.services.sincronizacion import ejecutar_operacion
 
     resultados = []
-    for dispositivo in Dispositivo.objects.filter(activo=True):
+    for dispositivo in Dispositivo.objects.filter(activo=True, modo=Dispositivo.Modo.SDK):
         registro, _ = ejecutar_operacion(
             dispositivo,
             RegistroSincronizacion.Operacion.SINCRONIZAR_HORA,
